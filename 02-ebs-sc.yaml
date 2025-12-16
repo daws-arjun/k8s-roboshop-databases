@@ -1,0 +1,39 @@
+# --------------------------------------------------------------
+# STORAGECLASS (Dynamic Provisioning)
+# --------------------------------------------------------------
+# This is created **once by Kubernetes Admins**.
+# Developers will ONLY create PVCs that reference this StorageClass.
+# When a PVC requests storage, AWS EBS CSI driver automatically 
+# creates an EBS volume dynamically.
+# --------------------------------------------------------------
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: roboshop-ebs                    # Name of the StorageClass used by PVCs
+
+# --------------------------------------------------------------
+# reclaimPolicy:
+# Retain → Do NOT delete the EBS disk when PVC/PV is deleted.
+#          Good for production when you want to keep the data safe.
+# Delete → Deletes the disk when PV is deleted (default for SC).
+# --------------------------------------------------------------
+reclaimPolicy: Retain
+
+# --------------------------------------------------------------
+# provisioner:
+# The CSI (Container Storage Interface) driver responsible for 
+# creating the actual EBS volume in AWS.
+# This must match the installed AWS EBS CSI driver on the cluster.
+# --------------------------------------------------------------
+provisioner: ebs.csi.aws.com            # AWS EBS CSI driver
+
+# --------------------------------------------------------------
+# volumeBindingMode:
+# WaitForFirstConsumer → 
+#    - PV and EBS disk will only be created AFTER a Pod requests the PVC.
+#    - Ensures the EBS volume is created in the SAME Availability Zone 
+#      where the Pod is scheduled.
+#
+# This avoids cross-AZ issues because EBS volumes are AZ-specific.
+# --------------------------------------------------------------
+volumeBindingMode: WaitForFirstConsumer

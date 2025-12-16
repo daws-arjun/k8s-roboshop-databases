@@ -1,0 +1,114 @@
+# ----------------------------------------------------------------------------------------
+# NORMAL SERVICE (ClusterIP)
+# Used by other applications inside the cluster to connect to Redis.
+# This service load-balances traffic across Redis pods.
+# ----------------------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: roboshop
+spec:
+  selector:
+    project: roboshop
+    component: redis
+    tier: db
+  ports:
+    - protocol: TCP
+      port: 6379       # Redis default port
+      targetPort: 6379 # Container port
+---
+# ----------------------------------------------------------------------------------------
+# HEADLESS SERVICE (clusterIP: None)
+# Required by StatefulSet for stable DNS names for each pod.
+#
+# It does NOT provide load balancing.
+# It exposes each pod individually:
+#   redis-0.redis-headless.roboshop.svc.cluster.local
+#   redis-1.redis-headless.roboshop.svc.cluster.local
+#
+# Useful for Redis clusters, replication, sentinel, or direct pod access.
+# ----------------------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-headless
+  namespace: roboshop
+spec:
+  clusterIP: None   # Makes it a HEADLESS service
+  selector:
+    project: roboshop
+    component: redis
+    tier: db
+  ports:
+    - protocol: TCP
+      port: 6379
+      targetPort: 6379
+---
+# ----------------------------------------------------------------------------------------
+# STATEFULSET — Best suited for databases like Redis
+#
+# Why StatefulSet?
+# ----------------
+# ✔ Stable pod names (redis-0, redis-1)  
+# ✔ Stable DNS via headless service  
+# ✔ Stable dedicated storage per pod  
+# ✔ Ordered startup / shutdown  
+#
+# Perfect for Redis master-slave or cluster mode.
+# ----------------------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: roboshop
+spec:
+  # StatefulSet matches pods using these labels
+  selector:
+    matchLabels:
+      project: roboshop
+      component: redis
+      tier: db
+
+  # MUST match the headless service name
+  serviceName: "redis-headless"
+
+  replicas: 2    # Creates redis-0 and redis-1
+
+  # -----------------------------
+  # Pod Template
+  # -----------------------------
+  template:
+    metadata:
+      labels:
+        project: roboshop
+        component: redis
+        tier: db
+    spec:
+      containers:
+      - name: redis
+        image: redis:7.0
+        # Redis stores its data in /data
+        volumeMounts:
+        - name: redis
+          mountPath: /data
+
+  # ------------------------------------------------------------------------------------
+  # PVC TEMPLATE — Creates a persistent disk for EACH Redis pod
+  #
+  # Example PVCs created automatically:
+  #   redis-redis-0
+  #   redis-redis-1
+  #
+  # Even if pod restarts, it gets SAME volume → data is preserved.
+  # Ideal for caching or Redis persistence (AOF / RDB).
+  # ------------------------------------------------------------------------------------
+  volumeClaimTemplates:
+  - metadata:
+      name: redis
+    spec:
+      accessModes: ["ReadWriteOnce"]    # EBS supports RWO only
+      storageClassName: "roboshop-ebs"  # StorageClass for dynamic provisioning
+      resources:
+        requests:
+          storage: 1Gi                  # 1GB storage per Redis node
