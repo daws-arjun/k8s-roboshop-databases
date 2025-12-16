@@ -1,0 +1,175 @@
+# ----------------------------------------------------------------------------------------
+# CONFIGMAP — Stores environment variables for the Shipping service.
+#
+# CART_ENDPOINT → URL to reach the Cart service
+# DB_HOST       → MySQL service name (used for shipping database)
+#
+# These values are injected into the Shipping container.
+# ----------------------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shipping
+  namespace: roboshop
+data:
+  CART_ENDPOINT: "cart:8080"    # Internal service DNS for Cart
+  DB_HOST: "mysql"              # MySQL hostname inside Kubernetes cluster
+
+---
+# ----------------------------------------------------------------------------------------
+# DEPLOYMENT — Runs the Shipping backend service.
+#
+# Provides:
+# ✔ Rolling updates
+# ✔ Restarts failed pods
+# ✔ Works with HPA for auto-scaling
+# ----------------------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shipping
+  namespace: roboshop
+
+  # Deployment-level labels (important for Service & HPA)
+  labels:
+    project: roboshop
+    component: shipping
+    tier: backend
+
+spec:
+  replicas: 1      # HPA will scale up/down based on CPU load
+
+  # Selects pods belonging this Deployment
+  selector:
+    matchLabels:
+      project: roboshop
+      component: shipping
+      tier: backend
+
+  # ---------------------------------
+  # POD TEMPLATE (Actual container spec)
+  # ---------------------------------
+  template:
+    metadata:
+      labels:
+        project: roboshop
+        component: shipping
+        tier: backend
+
+    spec:
+      containers:
+      - name: shipping
+        image: arjunaws/shipping:v1
+        imagePullPolicy: Always   # Pull image every time Deployment updates
+
+        # Load environment variables from ConfigMap
+        envFrom:
+        - configMapRef:
+            name: shipping
+
+        ports:
+        - name: liveness-port
+          containerPort: 8080     # Application runs on port 8080
+
+        # ----------------------------------------------------------
+        # RESOURCE REQUESTS & LIMITS
+        #
+        # requests → Minimum guaranteed resources
+        # limits   → Maximum allowed resources
+        #
+        # Shipping service is heavier (more logic + database calls),
+        # so it requires more CPU/memory compared to User service.
+        # ----------------------------------------------------------
+        resources:
+          requests:
+            cpu: "200m"         # Minimum 0.2 CPU
+            memory: "256Mi"
+          limits:
+            cpu: "400m"         # Maximum 0.4 CPU
+            memory: "512Mi"
+
+        # ----------------------------------------------------------
+        # READINESS PROBE
+        #
+        # Ensures pod receives traffic ONLY when completely ready.
+        # initialDelaySeconds = 60 → enough time for app startup
+        # ----------------------------------------------------------
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: liveness-port
+          failureThreshold: 1
+          periodSeconds: 15
+          initialDelaySeconds: 60
+
+        # ----------------------------------------------------------
+        # LIVENESS PROBE
+        #
+        # Restarts the pod if the application becomes unresponsive.
+        # ----------------------------------------------------------
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: liveness-port
+          failureThreshold: 1
+          periodSeconds: 15
+          initialDelaySeconds: 60
+
+---
+# ----------------------------------------------------------------------------------------
+# SERVICE — Internal load balancer for the Shipping service.
+#
+# Other microservices contact Shipping using:
+#   http://shipping.roboshop.svc.cluster.local:8080
+# ----------------------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: shipping
+  namespace: roboshop
+spec:
+  selector:
+    project: roboshop
+    component: shipping
+    tier: backend
+
+  ports:
+    - protocol: TCP
+      port: 8080      # Exposed service port
+      targetPort: 8080
+
+---
+# ----------------------------------------------------------------------------------------
+# HORIZONTAL POD AUTOSCALER (HPA)
+# Automatically scales pods up/down based on CPU utilization.
+#
+# Example:
+# If CPU > 5% (real production value = 70%),
+# Kubernetes will create more pods up to maxReplicas.
+# ----------------------------------------------------------------------------------------
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: shipping
+  namespace: roboshop
+  labels:
+    project: roboshop
+    component: shipping
+    tier: backend
+
+spec:
+  scaleTargetRef:          # Link to the Shipping Deployment
+    apiVersion: apps/v1
+    kind: Deployment
+    name: shipping
+
+  minReplicas: 1           # Always run at least one pod
+  maxReplicas: 10          # Scale up to 10 pods during heavy traffic
+
+  metrics:
+  - type: Resource          # CPU-based autoscaling
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 5   # Real world = 70%

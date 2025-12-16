@@ -106,7 +106,7 @@ spec:
     spec:
       containers:
       - name: mysql
-        image: joindevops/mysql:v1
+        image: arjunaws/mysql:v1
 
         # Mount the persistent data directory
         volumeMounts:

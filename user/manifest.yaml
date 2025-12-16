@@ -1,0 +1,164 @@
+# ----------------------------------------------------------------------------------------
+# CONFIGMAP — Stores non-sensitive configuration values for the User service.
+# These environment variables are injected into the container.
+#
+# MONGO       → tells application to use MongoDB
+# REDIS_URL   → Redis cache connection
+# MONGO_URL   → MongoDB database connection URL
+# ----------------------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: user
+  namespace: roboshop
+data:
+  MONGO: "true"
+  REDIS_URL: "redis://redis:6379"
+  MONGO_URL: "mongodb://mongodb:27017/users"
+
+---
+# ----------------------------------------------------------------------------------------
+# DEPLOYMENT — Runs the User backend microservice.
+# Ensures:
+#   ✔ Rolling updates
+#   ✔ Self-healing (restarts failed pods)
+#   ✔ Correct number of replicas (HPA will scale it)
+# ----------------------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user
+  namespace: roboshop
+
+  # Deployment-level labels (also used in Service & HPA)
+  labels:
+    project: roboshop
+    component: user
+    tier: backend
+
+spec:
+  replicas: 1     # HPA will scale this up/down based on load
+
+  # Select pods using these labels
+  selector:
+    matchLabels:
+      project: roboshop
+      component: user
+      tier: backend
+
+  # ---------------------------------
+  # POD TEMPLATE (actual pod spec)
+  # ---------------------------------
+  template:
+    metadata:
+      labels:
+        project: roboshop
+        component: user
+        tier: backend
+
+    spec:
+      containers:
+      - name: user
+        image: arjunaws/user:v1
+        imagePullPolicy: Always   # Always pull latest image on deploy
+
+        # Load all environment variables from ConfigMap
+        envFrom:
+        - configMapRef:
+            name: user
+
+        ports:
+        - name: liveness-port
+          containerPort: 8080     # Application listens on port 8080
+
+        # ------------------------------
+        # RESOURCE REQUESTS & LIMITS
+        # ------------------------------
+        # Prevents containers from consuming too many resources
+        resources:
+          requests:               # Minimum resources container needs
+            cpu: "100m"           # 0.1 CPU
+            memory: "128Mi"
+          limits:                 # Maximum allowed usage
+            cpu: "100m"
+            memory: "128Mi"
+
+        # ------------------------------
+        # READINESS PROBE
+        # Ensures pod receives traffic ONLY after it's ready.
+        # ------------------------------
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: liveness-port
+          failureThreshold: 1
+          periodSeconds: 15
+
+        # ------------------------------
+        # LIVENESS PROBE
+        # Ensures unhealthy containers are restarted automatically.
+        # ------------------------------
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: liveness-port
+          failureThreshold: 1
+          periodSeconds: 15
+
+---
+# ----------------------------------------------------------------------------------------
+# SERVICE — Internal load balancer for User microservice.
+# Provides a stable DNS name:
+#    user.roboshop.svc.cluster.local:8080
+# ----------------------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: user
+  namespace: roboshop
+spec:
+  selector:
+    project: roboshop
+    component: user
+    tier: backend
+
+  ports:
+    - protocol: TCP
+      port: 8080        # Exposed service port
+      targetPort: 8080  # Container's port
+
+---
+# ----------------------------------------------------------------------------------------
+# HORIZONTAL POD AUTOSCALER (HPA)
+# Automatically increases/decreases pod count based on CPU usage.
+#
+# Example:
+# If CPU usage goes above 5% (in real-world = 70%),
+# more User pods will be created automatically.
+# ----------------------------------------------------------------------------------------
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: user
+  namespace: roboshop
+  labels:
+    project: roboshop
+    component: user
+    tier: backend
+
+spec:
+  scaleTargetRef:        # Target the User Deployment for scaling
+    apiVersion: apps/v1
+    kind: Deployment
+    name: user
+
+  minReplicas: 1         # Minimum pods always running
+  maxReplicas: 10        # Maximum pods allowed during high load
+
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 5   # Real value in production → 70%

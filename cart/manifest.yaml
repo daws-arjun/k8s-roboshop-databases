@@ -1,0 +1,175 @@
+# ----------------------------------------------------------------------------------------
+# CONFIGMAP — Stores environment variables for the Cart microservice.
+#
+# REDIS_HOST       → Used for caching cart items
+# CATALOGUE_HOST   → To fetch product details
+# CATALOGUE_PORT   → Port on which catalogue service runs
+#
+# These values get injected into the container.
+# ----------------------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cart
+  namespace: roboshop
+data:
+  REDIS_HOST: "redis"            # Redis service DNS
+  CATALOGUE_HOST: "catalogue"    # Catalogue service name
+  CATALOGUE_PORT: "8080"         # Port on which catalogue runs
+
+---
+# ----------------------------------------------------------------------------------------
+# DEPLOYMENT — Runs the Cart backend microservice.
+#
+# Key responsibilities:
+# ✔ Ensures correct replica count (1 + autoscaling later)
+# ✔ Performs rolling updates
+# ✔ Restarts failed pods automatically
+# ----------------------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cart
+  namespace: roboshop
+
+  # Deployment-level labels (also used by Service & HPA)
+  labels:
+    project: roboshop
+    component: cart
+    tier: backend
+
+spec:
+  replicas: 1     # Base replica count; HPA will scale automatically
+
+  # Match pods using these labels
+  selector:
+    matchLabels:
+      project: roboshop
+      component: cart
+      tier: backend
+
+  # -------------------------------------
+  # POD TEMPLATE — What runs inside each pod
+  # -------------------------------------
+  template:
+    metadata:
+      labels:
+        project: roboshop
+        component: cart
+        tier: backend
+
+    spec:
+      containers:
+      - name: cart
+        image: arjunaws/cart:v1
+        imagePullPolicy: Always          # Ensures updated image is fetched
+
+        # Load environment variables from ConfigMap
+        envFrom:
+        - configMapRef:
+            name: cart
+
+        ports:
+        - name: liveness-port
+          containerPort: 8080            # Cart service listens on port 8080
+
+        # -------------------------------------
+        # RESOURCE REQUESTS & LIMITS
+        #
+        # requests → minimum guaranteed resources
+        # limits   → maximum allowed resources
+        #
+        # Cart service is lightweight; only 100m CPU and 128Mi memory.
+        # -------------------------------------
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "100m"
+            memory: "128Mi"
+
+        # -------------------------------------
+        # READINESS PROBE
+        # Ensures pod is ready before receiving traffic.
+        # -------------------------------------
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: liveness-port
+          failureThreshold: 1
+          periodSeconds: 15
+
+        # -------------------------------------
+        # LIVENESS PROBE
+        # Restarts the container if it becomes unhealthy.
+        # -------------------------------------
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: liveness-port
+          failureThreshold: 1
+          periodSeconds: 15
+
+---
+# ----------------------------------------------------------------------------------------
+# SERVICE — Stable internal endpoint for Cart service.
+#
+# Other services access Cart using:
+#   cart.roboshop.svc.cluster.local:8080
+#
+# Provides load-balanced access across replicas when scaled.
+# ----------------------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: cart
+  namespace: roboshop
+spec:
+  selector:
+    project: roboshop
+    component: cart
+    tier: backend
+
+  ports:
+    - protocol: TCP
+      port: 8080        # Service port
+      targetPort: 8080  # Container port
+
+---
+# ----------------------------------------------------------------------------------------
+# HORIZONTAL POD AUTOSCALER (HPA)
+# Automatically adds/removes Cart pods based on CPU usage.
+#
+# Example:
+# If CPU > 5% (real-world value is 70%), it will scale up automatically.
+#
+# minReplicas = 1 → Never scale below 1
+# maxReplicas = 10 → Maximum allowed
+# ----------------------------------------------------------------------------------------
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: cart
+  namespace: roboshop
+  labels:
+    project: roboshop
+    component: cart
+    tier: backend
+
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: cart
+
+  minReplicas: 1
+  maxReplicas: 10
+
+  metrics:
+  - type: Resource           # CPU-based autoscaling
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 5   # Real value = 70%
