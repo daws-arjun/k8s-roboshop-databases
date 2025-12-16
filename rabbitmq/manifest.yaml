@@ -1,0 +1,130 @@
+# ----------------------------------------------------------------------------------------
+# NORMAL SERVICE (ClusterIP)
+# Applications inside the cluster connect to RabbitMQ using:
+#   rabbitmq.roboshop.svc.cluster.local:5672
+#
+# It load-balances traffic across pods (if multiple replicas exist).
+# ----------------------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  namespace: roboshop
+spec:
+  selector:
+    project: roboshop
+    component: rabbitmq
+    tier: db
+  ports:
+    - protocol: TCP
+      port: 5672        # RabbitMQ default AMQP port
+      targetPort: 5672  # Container port
+
+---
+# ----------------------------------------------------------------------------------------
+# HEADLESS SERVICE (clusterIP: None)
+# Required by StatefulSet to give each RabbitMQ pod a stable DNS entry.
+#
+# Example DNS names automatically created:
+#   rabbitmq-0.rabbitmq-headless.roboshop.svc.cluster.local
+#   rabbitmq-1.rabbitmq-headless.roboshop.svc.cluster.local
+#
+# RabbitMQ clustering needs pod-to-pod communication with FIXED hostnames.
+# Headless service is the only way to achieve this in Kubernetes.
+# ----------------------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq-headless
+  namespace: roboshop
+spec:
+  clusterIP: None
+  selector:
+    project: roboshop
+    component: rabbitmq
+    tier: db
+  ports:
+    - protocol: TCP
+      port: 5672
+      targetPort: 5672
+
+---
+# ----------------------------------------------------------------------------------------
+# STATEFULSET — Ideal for RabbitMQ Clusters
+#
+# Why StatefulSet?
+# ----------------
+# ✔ Stable Pod Names      → rabbitmq-0, rabbitmq-1
+# ✔ Stable DNS            → via rabbitmq-headless service
+# ✔ Stable persistent storage per node
+# ✔ Ordered startup/shutdown
+#
+# Required for:
+# - RabbitMQ clustering
+# - High availability
+# - Avoiding message loss (persistent queues)
+# ----------------------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rabbitmq
+  namespace: roboshop
+spec:
+  selector:
+    matchLabels:
+      project: roboshop
+      component: rabbitmq
+      tier: db
+
+  # MUST match headless service
+  serviceName: "rabbitmq-headless"
+
+  replicas: 2   # Creates rabbitmq-0 and rabbitmq-1
+
+  # -----------------------------
+  # POD TEMPLATE
+  # -----------------------------
+  template:
+    metadata:
+      labels:
+        project: roboshop
+        component: rabbitmq
+        tier: db
+    spec:
+      containers:
+      - name: rabbitmq
+        image: rabbitmq:3
+
+        # Store persistent queues and metadata in /var/lib/rabbitmq
+        volumeMounts:
+        - name: rabbitmq
+          mountPath: /var/lib/rabbitmq
+
+        # Environment variables to create default username/password
+        env:
+        - name: RABBITMQ_DEFAULT_USER
+          value: roboshop
+        - name: RABBITMQ_DEFAULT_PASS
+          value: roboshop123
+
+  # ------------------------------------------------------------------------------------
+  # PVC TEMPLATE — Provides persistent storage per RabbitMQ node
+  #
+  # PVCs created:
+  #   rabbitmq-rabbitmq-0
+  #   rabbitmq-rabbitmq-1
+  #
+  # Ensures:
+  # ✔ Message durability (persistent queues)
+  # ✔ Node state not lost on restarts
+  # ✔ Supports RabbitMQ's disk-based clustering
+  # ------------------------------------------------------------------------------------
+  volumeClaimTemplates:
+  - metadata:
+      name: rabbitmq
+    spec:
+      accessModes: ["ReadWriteOnce"]       # Required for EBS
+      storageClassName: "roboshop-ebs"     # StorageClass for dynamic provisioning
+      resources:
+        requests:
+          storage: 1Gi                     # Allocate 1GB per RabbitMQ pod

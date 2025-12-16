@@ -1,0 +1,145 @@
+# ----------------------------------------------------------------------------------------
+# CONFIGMAP — Stores MySQL configuration file (my.cnf)
+# This is NOT sensitive, so ConfigMap is appropriate.
+# It will be mounted inside the container to override MySQL configs.
+# ----------------------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql
+  namespace: roboshop
+data:
+  my.cnf: |
+    [mysqld]
+    innodb_redo_log_capacity = 2G     # Example MySQL tuning parameter
+
+---
+# ----------------------------------------------------------------------------------------
+# NORMAL SERVICE (ClusterIP)
+# Used by applications to connect to MySQL using:
+#   mysql.roboshop.svc.cluster.local:3306
+# It load-balances across pods only if multiple replicas exist.
+# ----------------------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: roboshop
+spec:
+  selector:
+    project: roboshop
+    component: mysql
+    tier: db
+  ports:
+    - protocol: TCP
+      port: 3306         # MySQL default port
+      targetPort: 3306
+
+---
+# ----------------------------------------------------------------------------------------
+# HEADLESS SERVICE (clusterIP: None)
+# Required for StatefulSet to provide STABLE DNS records per pod.
+#
+# Example DNS entries created:
+#   mysql-0.mysql-headless.roboshop.svc.cluster.local
+#   mysql-1.mysql-headless.roboshop.svc.cluster.local
+#
+# Headless services DO NOT load-balance.
+# They expose EACH pod individually—important for DB clustering & replication.
+# ----------------------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-headless
+  namespace: roboshop
+spec:
+  clusterIP: None       # Makes it a HEADLESS service
+  selector:
+    project: roboshop
+    component: mysql
+    tier: db
+  ports:
+    - protocol: TCP
+      port: 3306
+      targetPort: 3306
+
+---
+# ----------------------------------------------------------------------------------------
+# STATEFULSET — Best suited for databases like MySQL
+#
+# Why StatefulSet?
+# ----------------
+# ✔ Stable pod names: mysql-0, mysql-1
+# ✔ Stable DNS from headless service
+# ✔ Stable storage — each pod gets its own PVC
+# ✔ POD-TO-POD communication is consistent
+#
+# Perfect for PRIMARY/REPLICA setups in MySQL.
+# ----------------------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: roboshop
+spec:
+  # Must match labels inside the pod template
+  selector:
+    matchLabels:
+      project: roboshop
+      component: mysql
+      tier: db
+
+  # MUST match the headless service name
+  serviceName: "mysql-headless"
+
+  replicas: 2     # Creates mysql-0 and mysql-1
+
+  # --------------------------
+  # POD TEMPLATE (actual pod spec)
+  # --------------------------
+  template:
+    metadata:
+      labels:
+        project: roboshop
+        component: mysql
+        tier: db
+    spec:
+      containers:
+      - name: mysql
+        image: joindevops/mysql:v1
+
+        # Mount the persistent data directory
+        volumeMounts:
+        - name: mysql
+          mountPath: /data/db     # MySQL data directory
+
+        # Mount ConfigMap as my.cnf inside MySQL config directory
+        # subPath ensures only file 'my.cnf' is mounted, not entire folder
+        - name: mysql-config
+          mountPath: /etc/mysql/conf.d/my.cnf
+          subPath: my.cnf
+
+      # Mount ConfigMap volume
+      volumes:
+        - name: mysql-config
+          configMap:
+            name: mysql
+
+  # ------------------------------------------------------------------------------------
+  # PVC TEMPLATE — Creates 1 persistent volume per pod
+  #
+  # PVC names will be:
+  #   mysql-mysql-0
+  #   mysql-mysql-1
+  #
+  # Even if pods restart, the SAME disk is attached → data is preserved.
+  # ------------------------------------------------------------------------------------
+  volumeClaimTemplates:
+  - metadata:
+      name: mysql
+    spec:
+      accessModes: ["ReadWriteOnce"]      # EBS volumes = RWO only
+      storageClassName: "roboshop-ebs"    # Dynamic provisioning
+      resources:
+        requests:
+          storage: 1Gi                    # 1GB volume per MySQL pod
