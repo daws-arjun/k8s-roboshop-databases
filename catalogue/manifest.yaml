@@ -1,0 +1,160 @@
+# --------------------------------------------------------------
+# CONFIGMAP: Stores environment variables (non-sensitive data)
+# --------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: catalogue
+  namespace: roboshop
+data:
+  # Flag to enable MongoDB inside the application
+  MONGO: "true"
+
+  # Service DNS → mongodb.roboshop.svc.cluster.local:27017
+  MONGO_URL: "mongodb://mongodb:27017/catalogue"
+
+---
+# --------------------------------------------------------------
+# DEPLOYMENT: Runs the Catalogue backend API
+# --------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalogue
+  namespace: roboshop
+
+  # Deployment-level labels (also used for HPA and Service)
+  labels:
+    project: roboshop
+    component: catalogue
+    tier: backend
+
+spec:
+  replicas: 1   # Starting with 1 pod, HPA will scale it later
+
+  # Deployment chooses pods that match these labels
+  selector:
+    matchLabels:
+      project: roboshop
+      component: catalogue
+      tier: backend
+
+  # ----------------------------------
+  # POD TEMPLATE (actual container spec)
+  # ----------------------------------
+  template:
+    metadata:
+      labels:
+        project: roboshop
+        component: catalogue
+        tier: backend
+
+    spec:
+      containers:
+      - name: catalogue
+        image: joindevops/catalogue:v1
+        imagePullPolicy: Always   # Always pull latest image version
+
+        # Inject all keys from ConfigMap as environment variables
+        envFrom:
+        - configMapRef:
+            name: catalogue
+
+        ports:
+        - name: liveness-port
+          containerPort: 8080
+
+        # --------------------------
+        # RESOURCE REQUESTS & LIMITS
+        # --------------------------
+        # CPU = 100m → 0.1 CPU core
+        # Memory = 128Mi → 128 MB
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "100m"
+            memory: "128Mi"
+
+        # --------------------------
+        # READINESS PROBE
+        # --------------------------
+        # Kubernetes sends traffic to pod only after it becomes READY
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: liveness-port
+          failureThreshold: 1
+          periodSeconds: 15
+
+        # --------------------------
+        # LIVENESS PROBE
+        # --------------------------
+        # Restarts the pod if it becomes unhealthy
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: liveness-port
+          failureThreshold: 1
+          periodSeconds: 15
+
+---
+# --------------------------------------------------------------
+# SERVICE: Internal Load Balancer for Catalogue pods
+# --------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: catalogue
+  namespace: roboshop
+spec:
+  selector:
+    project: roboshop
+    component: catalogue
+    tier: backend
+
+  ports:
+    - protocol: TCP
+      port: 8080       # Service port used by other apps
+      targetPort: 8080 # Actual container port
+
+---
+# --------------------------------------------------------------
+# HORIZONTAL POD AUTOSCALER (HPA)
+# --------------------------------------------------------------
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: catalogue
+  namespace: roboshop
+  labels:
+    project: roboshop
+    component: catalogue
+    tier: backend
+
+spec:
+  # Scale the Deployment named "catalogue"
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: catalogue
+
+  minReplicas: 1     # Minimum 1 pod should always run
+  maxReplicas: 10    # Pods can scale up to 10 when traffic increases
+
+  # ---------------------------------------------------
+  # METRIC: CPU UTILIZATION BASED AUTOSCALING
+  # averageUtilization: 5 means:
+  #   If CPU usage > 5% of requested CPU (100m),
+  #   HPA will create more pods automatically.
+  #
+  # Real production value is 70% (as you noted).
+  # ---------------------------------------------------
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 5

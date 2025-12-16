@@ -1,0 +1,120 @@
+# ----------------------------------------------------------------------------------------
+# NORMAL SERVICE (ClusterIP): Used for load-balanced access to MongoDB
+# Applications inside the cluster will connect using:
+#   mongodb.roboshop.svc.cluster.local:27017
+# ----------------------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb
+  namespace: roboshop
+spec:
+  selector:
+    project: roboshop
+    component: mongodb
+    tier: db
+  ports:
+    - protocol: TCP
+      port: 27017       # Service port (stable)
+      targetPort: 27017 # Container port
+
+---
+# ----------------------------------------------------------------------------------------
+# HEADLESS SERVICE (clusterIP: None)
+# Required by StatefulSet to provide stable DNS names for each MongoDB pod.
+#
+# Example DNS entries created:
+#   mongodb-0.mongodb-headless.roboshop.svc.cluster.local
+#   mongodb-1.mongodb-headless.roboshop.svc.cluster.local
+#
+# IMPORTANT:
+# - No load balancing
+# - No ClusterIP
+# - Direct POD-TO-POD communication (needed for DB clusters / replicas)
+# ----------------------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb-headless
+  namespace: roboshop
+spec:
+  clusterIP: None       # Makes this a HEADLESS service
+  selector:
+    project: roboshop
+    component: mongodb
+    tier: db
+  ports:
+    - protocol: TCP
+      port: 27017
+      targetPort: 27017
+
+---
+# ----------------------------------------------------------------------------------------
+# STATEFULSET — Used for Databases (MongoDB)
+#
+# WHY STATEFULSET?
+# ----------------
+# 1. Stable pod names (mongodb-0, mongodb-1)
+# 2. Stable DNS entries (via headless service)
+# 3. Each pod gets its own dedicated persistent volume (PVC)
+# 4. Orderly startup and shutdown (important for databases)
+#
+# This makes StatefulSet PERFECT for MongoDB clusters.
+# ----------------------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mongodb
+  namespace: roboshop
+spec:
+  # ------------------------------
+  # Pod Selector (must match labels in template)
+  # ------------------------------
+  selector:
+    matchLabels:
+      project: roboshop
+      component: mongodb
+      tier: db
+
+  # Headless service name → REQUIRED for stable network identities
+  serviceName: "mongodb-headless"
+
+  replicas: 2  # Creates mongodb-0 and mongodb-1
+
+  # ------------------------------
+  # Pod Template
+  # ------------------------------
+  template:
+    metadata:
+      labels:
+        project: roboshop
+        component: mongodb
+        tier: db
+    spec:
+      containers:
+      - name: mongodb
+        image: arjunaws/mongodb:v1
+        # MongoDB stores data in /data/db
+        volumeMounts:
+        - name: mongodb
+          mountPath: /data/db
+
+  # ------------------------------------------------------------------------------------
+  # PVC TEMPLATE — Creates a dedicated volume for EACH POD
+  #
+  # PVC Names will be:
+  #   mongodb-mongodb-0
+  #   mongodb-mongodb-1
+  #
+  # Even if pods restart or move, they keep the same disk.
+  # This ensures persistent database storage.
+  # ------------------------------------------------------------------------------------
+  volumeClaimTemplates:
+  - metadata:
+      name: mongodb
+    spec:
+      accessModes: ["ReadWriteOnce"]       # EBS supports RWO only
+      storageClassName: "roboshop-ebs"     # Custom storage class
+      resources:
+        requests:
+          storage: 1Gi                      # Size of each volume
