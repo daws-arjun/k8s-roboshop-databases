@@ -1,0 +1,233 @@
+# ----------------------------------------------------------------------------------------
+# CONFIGMAP — Stores the custom nginx.conf used by the frontend.
+# This file configures:
+# ✔ API reverse proxy routing to backend microservices
+# ✔ Health endpoint (/health)
+# ✔ Static file serving
+# ✔ Caching for images
+#
+# The entire nginx.conf will be mounted into the pod at runtime.
+# ----------------------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frontend
+  namespace: roboshop
+data:
+  nginx.conf: |
+    user nginx;
+    worker_processes auto;
+    error_log /var/log/nginx/error.log notice;
+    pid /run/nginx.pid;
+
+    include /usr/share/nginx/modules/*.conf;
+
+    events {
+        worker_connections 1024;
+    }
+
+    http {
+        log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                          '$status $body_bytes_sent "$http_referer" '
+                          '"$http_user_agent" "$http_x_forwarded_for"';
+
+        access_log  /var/log/nginx/access.log  main;
+
+        sendfile            on;
+        tcp_nopush          on;
+        keepalive_timeout   65;
+        types_hash_max_size 4096;
+
+        include             /etc/nginx/mime.types;
+        default_type        application/octet-stream;
+
+        include /etc/nginx/conf.d/*.conf;
+
+        server {
+            listen       8080;
+            listen       [::]:8080;
+            server_name  _;
+            root         /usr/share/nginx/html;
+
+            include /etc/nginx/default.d/*.conf;
+
+            error_page 404 /404.html;
+            location = /404.html { }
+
+            error_page 500 502 503 504 /50x.html;
+            location = /50x.html { }
+
+            # Cache static images for 5 seconds
+            location /images/ {
+              expires 5s;
+              root   /usr/share/nginx/html;
+              try_files $uri /images/placeholder.jpg;
+            }
+
+            # Reverse proxy routes for backend microservices
+            location /api/catalogue/ { proxy_pass http://catalogue:8080/; }
+            location /api/user/      { proxy_pass http://user:8080/; }
+            location /api/cart/      { proxy_pass http://cart:8080/; }
+            location /api/shipping/  { proxy_pass http://shipping:8080/; }
+            location /api/payment/   { proxy_pass http://payment:8080/; }
+
+            # Health check endpoint for Kubernetes
+            location /health {
+              stub_status on;
+              access_log off;
+            }
+        }
+    }
+
+---
+# ----------------------------------------------------------------------------------------
+# DEPLOYMENT — Runs the NGINX-based frontend service.
+#
+# Responsibilities:
+# ✔ Serves HTML/JS/CSS files
+# ✔ Acts as reverse proxy for all backend APIs
+# ✔ Uses custom nginx.conf loaded from ConfigMap
+# ----------------------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: roboshop
+  labels:
+    project: roboshop
+    component: frontend
+    tier: frontend
+
+spec:
+  replicas: 1   # HPA will scale this automatically based on CPU
+
+  selector:
+    matchLabels:
+      project: roboshop
+      component: frontend
+      tier: frontend
+
+  # -----------------------------------
+  # POD TEMPLATE
+  # -----------------------------------
+  template:
+    metadata:
+      labels:
+        project: roboshop
+        component: frontend
+        tier: frontend
+
+    spec:
+      containers:
+      - name: frontend
+        image: joindevops/frontend:v1
+        imagePullPolicy: Always
+
+        ports:
+        - name: liveness-port
+          containerPort: 8080    # NGINX listens on port 8080
+
+        # -------------------------------
+        # Resources: Frontend is lightweight
+        # -------------------------------
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "100m"
+            memory: "128Mi"
+
+        # -------------------------------
+        # Health Probes
+        #
+        # Readiness: Pod ready to serve traffic
+        # Liveness: Restart if stuck/unhealthy
+        # -------------------------------
+        readinessProbe:
+          httpGet:
+            path: /
+            port: liveness-port
+          failureThreshold: 1
+          periodSeconds: 15
+
+        livenessProbe:
+          httpGet:
+            path: /
+            port: liveness-port
+          failureThreshold: 1
+          periodSeconds: 15
+
+        # -------------------------------
+        # Mount nginx.conf from ConfigMap
+        # -------------------------------
+        volumeMounts:
+        - name: nginx-config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf   # Only this file is mounted
+
+      volumes:
+      - name: nginx-config
+        configMap:
+          name: frontend
+
+---
+# ----------------------------------------------------------------------------------------
+# SERVICE — Exposes frontend to users.
+#
+# type: LoadBalancer → Makes it accessible from outside (public internet)
+#
+# Redirects:
+#   External port 80 → Container port 8080
+# ----------------------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: roboshop
+spec:
+  type: LoadBalancer        # Makes frontend accessible externally
+  selector:
+    project: roboshop
+    component: frontend
+    tier: frontend
+
+  ports:
+    - protocol: TCP
+      port: 80              # Public port for users
+      targetPort: 8080      # NGINX port inside container
+
+---
+# ----------------------------------------------------------------------------------------
+# HORIZONTAL POD AUTOSCALER (HPA)
+#
+# Frontend receives high traffic, so auto-scaling is important.
+#
+# If CPU > 5% (real-world: 70%), new pods will be created up to 10 pods.
+# ----------------------------------------------------------------------------------------
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: frontend
+  namespace: roboshop
+  labels:
+    project: roboshop
+    component: frontend
+    tier: frontend
+
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: frontend
+
+  minReplicas: 1
+  maxReplicas: 10
+
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 5   # Real production value = 70
